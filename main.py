@@ -670,23 +670,142 @@ async def update_center(
         raise HTTPException(status_code=500, detail=str(e))
         
 #Crud de recursos
-#En prosceso
 
-@app.post("/resources")
-async def addresources(
-    email : str,
-    center_fk : str = Form(...),
-    resources_name : str = Form(...),
-    resources_type : str = Form(...),
-    amount: str = Form(...),
-    resources_status: str = Form(...),
+@app.get("/resource/{resource_id}")#obtener recurso apartir del id
+async def getResource(
+  resource_id: str  
 ):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM resources WHERE resources_id = %s",(resource_id,))
+        resource = cursor.fetchone()
+
+        if not resource:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+        resource_data = {
+            "resources_id": resource[0],
+            "center_fk": resource[1],
+            "resource_name": resource[2],
+            "resource_type": resource[3],
+            "amount": resource[4],
+            "resource_status": resource[5]
+        }
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"resource": resource_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/registerResource/{center_fk}")
+async def register_resource(
+    center_fk: int,
+    resource_name: str = Form(...),
+    resource_type: str = Form(...),  # ENUM: "clothes", "food", "money"
+    amount: int = Form(...),
+    resource_status: str = Form(...),  # ENUM: "shortage", "urgent", "stocked"
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM center WHERE user_id = %s",(center_fk,))
+        resource = cursor.fetchone()
+        if not resource:
+            raise HTTPException(status_code=404, detail="Centro no encontrado.")
+
+        valid_resource_types = {"clothes", "food", "money"}
+        if resource_type not in valid_resource_types:
+            raise HTTPException(status_code=400, detail=f"Invalid resource_type. Valid options are: {valid_resource_types}")
+
+        valid_resource_statuses = {"shortage", "urgent", "stocked"}
+        if resource_status not in valid_resource_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid resource_status. Valid options are: {valid_resource_statuses}")
+
+        sql = """
+        INSERT INTO resources (center_fk, resource_name, resource_type, amount, resource_status) 
+        VALUES (%s, %s, %s, %s, %s)
+        """
+        values = (center_fk, resource_name, resource_type, amount, resource_status)
+        cursor.execute(sql, values)
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {"message": "Resource registered successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/updateResource/{center_fk}")
+async def updateResource(
+    center_fk : str,
+    resource_name: Optional[str] = Form(None),
+    resource_type: Optional[str] = Form(None),# ENUM: "clothes", "food", "money"
+    amount: Optional[str] = Form(None),
+    resource_status: Optional[str] = Form(None)  # ENUM: "shortage", "urgent", "stocked"
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM center WHERE user_id = %s",(center_fk,))
+        center = cursor.fetchone()
+        if not center:
+            raise HTTPException(status_code=404, detail="Centro no encontrado.")
+        
+        valid_resource_types = {"clothes", "food", "money"}
+        if resource_type not in valid_resource_types:
+            raise HTTPException(status_code=400, detail=f"Invalid resource_type. Valid options are: {valid_resource_types}")
+
+        valid_resource_statuses = {"shortage", "urgent", "stocked"}
+        if resource_status not in valid_resource_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid resource_status. Valid options are: {valid_resource_statuses}")
+        
+        update_fields = []
+        values = []
+        
+        if resource_name:
+            update_fields.append("resource_name = %s")
+            values.append(resource_name)
+        if resource_type:
+            update_fields.append("resource_type = %s")
+            values.append(resource_type)
+        if amount:
+            update_fields.append("amount = %s")
+            values.append(amount)
+        if resource_status:
+            update_fields.append("resource_status = %s")
+            values.append(resource_status)
+        
+        values.append(center_fk)
+        
+        sql = f"UPDATE resources SET {', '.join(update_fields)} WHERE center_fk = %s"
+        cursor.execute(sql,values)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"message": "Centro actualizado exitosamente."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     
-    cursor.execute("SELECT * FROM users WHERE email",(email,))
-    existing_user = cursor.fetchone()
-    if existing_user:
-         raise HTTPException(status_code=400, detail="El correo ya está registrado.")
-     
-    
+@app.delete("/deleteResource/{resource_id}")
+async def deleteResource(
+  resource_id: str  
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM resources WHERE resources_id = %s",(resource_id,))
+        center = cursor.fetchone()
+        if not center:
+            raise HTTPException(status_code=404, detail="Resource not found.")
+        cursor.execute("DELETE FROM resources WHERE resources_id = %s", (resource_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return {"message": "resource removed successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+#crud donations inprogress
