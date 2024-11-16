@@ -153,10 +153,10 @@ async def register_user(
         
         
         sql = """
-        INSERT INTO users (user_name, email, pasword, is_verified, is_admin, images) 
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO users (user_name, email, pasword, is_verified, is_admin, is_sponsor, images) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
-        values = (user_name, email, hashed_password, False, False, image_url)
+        values = (user_name, email, hashed_password, False, False, False, image_url)
         cursor.execute(sql, values)
         conn.commit()
         
@@ -199,6 +199,14 @@ def login(usr: LoginRequest):
             if cursor.fetchone():
                 user_type = "center"
 
+        user_data = {
+            "id": user_record[0],
+            "name": user_record[1],
+            "email": user_record[2],
+            "is_verified": user_record[4],
+            "is_admin": user_record[5],
+            "is_sponsor": user_record[6]
+        }
         conn.close()
         
         token = jwt.encode(
@@ -207,7 +215,7 @@ def login(usr: LoginRequest):
             algorithm="HS256"
         )
         
-        return {"access_token": token, "token_type": "bearer", "user_type": user_type}
+        return {"access_token": token, "token_type": "bearer", "user_type": user_type, "user": user_data}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -237,7 +245,77 @@ async def delete_user(email: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/user/{email}") #traer usuarios por email (version resumida)
+async def get_user(gmail: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images 
+            FROM users 
+            WHERE email = %s
+        """, (gmail,))
+        user = cursor.fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+        user_data = {
+            "user_id": user[0],
+            "user_name": user[1],
+            "email": user[2],
+            "is_verified": user[3],
+            "is_admin": user[4],
+            "is_sponsor": user[5],
+            "images": user[6],
+        }
+
+        cursor.close()
+        conn.close()
+        return {"user": user_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 #CRUD donors
+
+@app.get("/donor/{email}")#Traer donantes por email
+async def get_donor(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT user_id, user_name, last_name, email, phone_numer, is_verified, is_admin, is_sponsor, images 
+            FROM donors 
+            WHERE email = %s
+        """, (email,))
+        donor = cursor.fetchone()
+
+        if not donor:
+            raise HTTPException(status_code=404, detail="Donante no encontrado.")
+
+        donor_data = {
+            "user_id": donor[0],
+            "user_name": donor[1],
+            "last_name": donor[2],
+            "email": donor[3],
+            "phone_number": donor[4],
+            "is_verified": donor[5],
+            "is_admin": donor[6],
+            "is_sponsor": donor[7],
+            "images": donor[8],
+        }
+
+        cursor.close()
+        conn.close()
+        return {"donor": donor_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/registerDon")
 async def register_user(
     user_name: str = Form(...),
@@ -268,10 +346,10 @@ async def register_user(
         
         
         sql = """
-        INSERT INTO donors (user_name, last_name, email, pasword, phone_numer, is_verified, is_admin, images) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO donors (user_name, last_name, email, pasword, phone_numer, is_verified, is_admin, is_sponsor, images) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
-        values = (user_name, last_name, email, hashed_password, phone_number, False, False, image_url)
+        values = (user_name, last_name, email, hashed_password, phone_number, False, False, False, image_url)
         cursor.execute(sql, values)
         conn.commit()
         
@@ -295,6 +373,7 @@ async def update_donor(
     password: Optional[str] = Form(None),
     is_active: Optional[bool] = Form(None),
     is_verified: Optional[bool] = Form(None),
+    is_sponsor: Optional[bool] = Form(None),
     phone_number: Optional[str] = Form(None),
     image: Optional[UploadFile] = File(None)
 ):
@@ -338,6 +417,10 @@ async def update_donor(
         if is_verified is not None:
             update_fields.append("is_verified = %s")
             values.append(is_verified)
+            
+        if is_sponsor is not None:
+            update_fields.append("is_sponsor = %s")
+            values.append(is_sponsor)    
 
         if image:
             image_path = UPLOAD_DIR / image.filename
@@ -360,6 +443,63 @@ async def update_donor(
         raise HTTPException(status_code=500, detail=str(e))
 
 # CRUD centers
+
+@app.get("/center/{email}")#Traer centros por email
+async def get_center(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT 
+                user_id, user_name, email, is_verified, is_admin, is_sponsor, 
+                contact, addres, type_center, needs, donations, images 
+            FROM center 
+            WHERE email = %s
+        """, (email,))
+        center = cursor.fetchone()
+
+        if not center:
+            raise HTTPException(status_code=404, detail="Centro no encontrado.")
+
+        # Extraer el dato de contacto
+        contact = center[6]  # Campo compuesto
+        contact_phone_number = None
+        contact_social_media = None
+        contact_others = None
+
+        # Desempaquetar contact si tiene valores
+        if contact:
+           contact_data = contact.strip("()").split(",")  # Quitar paréntesis y dividir por comas
+           contact_phone_number = contact_data[0].strip() if contact_data[0].strip() else None
+           contact_social_media = contact_data[1].strip() if len(contact_data) > 1 and contact_data[1].strip() else None
+           contact_others = contact_data[2].strip() if len(contact_data) > 2 and contact_data[2].strip() else None
+
+        center_data = {
+            "user_id": center[0],
+            "user_name": center[1],
+            "email": center[2],
+            "is_verified": center[3],
+            "is_admin": center[4],
+            "is_sponsor": center[5],
+            "contact": {
+                "phone_number": contact_phone_number,
+                "social_media": contact_social_media,
+                "others": contact_others,
+            },
+            "address": center[7],
+            "type_center": center[8],
+            "needs": center[9],
+            "donations": center[10],
+            "images": center[11],
+        }
+        cursor.close()
+        conn.close()
+        return {"center": center_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/registerCen")
 async def register_center(
     user_name: str = Form(...),
@@ -401,11 +541,11 @@ async def register_center(
             raise HTTPException(status_code=400, detail="Necesidad inválida.")
         
         sql = """
-        INSERT INTO center (user_name, email, pasword, is_verified, is_admin, contact, addres, type_center, needs, donations, images) 
-        VALUES (%s, %s, %s, %s, %s, ROW(%s, %s, %s)::contacts, %s, %s, %s, %s, %s)
+        INSERT INTO center (user_name, email, pasword, is_verified, is_admin, is_sponsor, contact, addres, type_center, needs, donations, images) 
+        VALUES (%s, %s, %s, %s, %s, %s, ROW(%s, %s, %s)::contacts, %s, %s, %s, %s, %s)
         """
         values = (
-            user_name, email, hashed_password, False, False,
+            user_name, email, hashed_password, False, False,False,
             contact_phone_number, contact_social_media, contact_others,  # Datos para el tipo compuesto
             address, type_center, needs, donations, image_url
         )
@@ -436,6 +576,7 @@ async def update_center(
     address: Optional[str] = Form(None),
     is_active: Optional[bool] = Form(None),
     is_verified: Optional[bool] = Form(None),
+    is_sponsor: Optional[bool] = Form(None),
     image: Optional[UploadFile] = File(None)
 ):
     try:
@@ -510,6 +651,10 @@ async def update_center(
         if is_verified is not None:
             update_fields.append("is_verified = %s")
             values.append(is_verified)
+            
+        if is_sponsor is not None:
+            update_fields.append("is_sponsor = %s")
+            values.append(is_sponsor)
 
         values.append(email)
 
@@ -526,3 +671,22 @@ async def update_center(
         
 #Crud de recursos
 #En prosceso
+
+@app.post("/resources")
+async def addresources(
+    email : str,
+    center_fk : str = Form(...),
+    resources_name : str = Form(...),
+    resources_type : str = Form(...),
+    amount: str = Form(...),
+    resources_status: str = Form(...),
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT * FROM users WHERE email",(email,))
+    existing_user = cursor.fetchone()
+    if existing_user:
+         raise HTTPException(status_code=400, detail="El correo ya está registrado.")
+     
+    
