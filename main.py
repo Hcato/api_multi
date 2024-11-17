@@ -1,11 +1,14 @@
 import json
+from bson import ObjectId
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import Depends, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from fastapi import BackgroundTasks
-from typing import Optional
+from typing import Literal, Optional
 import jwt
 from jwt import ExpiredSignatureError, DecodeError
 import bcrypt
@@ -14,12 +17,14 @@ from pathlib import Path
 import shutil
 import psycopg2.extras
 from psycopg2.extras import RealDictCursor
+from pymongo import MongoClient
 from dotenv import load_dotenv
 
 #Configuraciones, Metodos y clases a usar, asi como cargar informacion del .env
 
 load_dotenv()
 app = FastAPI()
+security = HTTPBearer()
 
 UPLOAD_DIR = Path("uploaded_images")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -45,6 +50,23 @@ conf = ConnectionConfig(
 
 SECRET_KEY = os.getenv("SECRET_KEY", "mysecretkey")
 
+def validate_center_token(#validacion de los centros para crud de noticias
+    credentials: HTTPAuthorizationCredentials = Security(security)
+):
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        
+        # Verificar si el token es de un usuario de tipo "center"
+        if payload.get("type") != "center":
+            raise HTTPException(status_code=403, detail="No tienes permisos para esta acción")
+        
+        return payload  # Retorna los datos del token si es válido
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="El token ha expirado")
+    except DecodeError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
 class User(BaseModel):
     user_name: str
     email: str
@@ -66,6 +88,17 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+
+class News(BaseModel):
+    id: Optional[str] = Field(alias="_id")  # El _id de MongoDB
+    title: str
+    content: str
+    public_date: datetime = Field(default_factory=datetime.utcnow)
+    image: Optional[str] = None
+    status: Literal["urgent", "priority", "events"]
+    author: str  # ID del autor (puede ser el ID del usuario "center")
+
+
 def get_db_connection():
     return psycopg2.connect(
         host=os.getenv('DB_HOST'),
@@ -74,6 +107,26 @@ def get_db_connection():
         database=os.getenv('DB_NAME'),
         port=os.getenv('DB_PORT')
     )
+    
+def get_mongo_client(): #conexion con mongodb
+    return MongoClient(os.getenv("MONGO_URI"))
+
+client = get_mongo_client()
+db = client[os.getenv("MONGO_DB_NAME")]
+news_collection = db["news"]
+
+# Configurar carpeta para subir imágenes
+UPLOAD_DIR = Path("uploaded_images")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+@app.get("/mongo-data")#Traer todos los objetos de mongo(news)
+def get_data_from_mongo():
+    client = get_mongo_client()
+    db = client[os.getenv("MONGO_DB_NAME")]  # Nombre de la base de datos
+    collection = db["news"]       # Nombre de la colección
+    
+    data = list(collection.find({}, {"_id": 0}))  # Consulta todos los documentos
+    return {"data": data}
 
 def generar_token_verificacion(email: str):
     token = jwt.encode(
@@ -808,4 +861,93 @@ async def deleteResource(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
         
-#crud donations inprogress
+#crud news (in mongodb)
+@app.post("/news", dependencies=[Depends(validate_center_token)])
+async def create_news(
+    title: str = Form(...),
+    content: str = Form(...),
+    status: Literal["urgent", "priority", "events", "common"] = Form(...),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)  # Obtén los datos del usuario autenticado
+):
+    try:
+        # Subir la imagen si se proporciona
+        image_url = None
+        if image:
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_url = f"/uploaded_images/{image.filename}"
+
+        # Crear el documento de la noticia
+        news_data = {
+            "title": title,
+            "content": content,
+            "public_date": datetime.utcnow(),
+            "image": image_url,
+            "status": status,
+            "author": current_user["sub"],  # Email del autor desde el token
+        }
+
+        # Insertar en MongoDB
+        result = news_collection.insert_one(news_data)
+        return {"message": "News created successfully", "news_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def update_news(
+    news_id: str,
+    new_title: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
+    status: Optional[Literal["urgent", "priority", "events"]] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)
+):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para actualizar esta noticia")
+
+        # Actualizar los campos proporcionados
+        update_data = {}
+        if new_title:
+            update_data["title"] = new_title
+        if content:
+            update_data["content"] = content
+        if status:
+            update_data["status"] = status
+        if image:
+            # Subir la nueva imagen
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            update_data["image"] = f"/uploaded_images/{image.filename}"
+
+        # Actualizar en MongoDB
+        result = news_collection.update_one({"_id": ObjectId(news_id)}, {"$set": update_data})
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def delete_news(news_id: str, current_user: dict = Depends(validate_center_token)):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para eliminar esta noticia")
+
+        # Eliminar la noticia
+        result = news_collection.delete_one({"_id": ObjectId(news_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
