@@ -108,16 +108,33 @@ def get_db_connection():
         port=os.getenv('DB_PORT')
     )
     
-def get_mongo_client(): #conexion con mongodb
-    return MongoClient(os.getenv("MONGO_URI"))
+def get_mongo_client():#Conectar con mongo(mongodbAtlas)
+    mongo_uri = os.getenv("MONGO_URI")
+    return MongoClient(mongo_uri)
 
 client = get_mongo_client()
 db = client[os.getenv("MONGO_DB_NAME")]
 news_collection = db["news"]
 
-# Configurar carpeta para subir imágenes
-UPLOAD_DIR = Path("uploaded_images")
-UPLOAD_DIR.mkdir(exist_ok=True)
+load_dotenv()
+
+def test_mongo_connection():#Testear coneccion con mongo
+    try:
+        # Crear cliente usando la URI
+        mongo_uri = os.getenv("MONGO_URI")
+        client = MongoClient(mongo_uri)
+        
+        # Seleccionar base de datos
+        db = client[os.getenv("MONGO_DB_NAME")]
+        
+        # Probar conexión
+        print("Conexión exitosa a MongoDB Atlas")
+        print("Bases de datos disponibles:", client.list_database_names())
+    except Exception as e:
+        print(f"Error al conectar a MongoDB Atlas: {e}")
+
+# Llamar la función
+test_mongo_connection()
 
 @app.get("/mongo-data")#Traer todos los objetos de mongo(news)
 def get_data_from_mongo():
@@ -299,7 +316,7 @@ async def delete_user(email: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/user/{email}") #traer usuarios por email (version resumida)
-async def get_user(gmail: str):
+async def get_user(email: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -308,7 +325,7 @@ async def get_user(gmail: str):
             SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images 
             FROM users 
             WHERE email = %s
-        """, (gmail,))
+        """, (email,))
         user = cursor.fetchone()
 
         if not user:
