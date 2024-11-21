@@ -1,9 +1,10 @@
 import json
-from bson import ObjectId
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from bson import ObjectId, decode
+from fastapi import FastAPI, HTTPException, File, Request, UploadFile, Form
 from fastapi import Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
@@ -36,7 +37,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+app.mount("/uploaded_images", StaticFiles(directory="uploaded_images"), name="uploaded_images")
 conf = ConnectionConfig(
     MAIL_USERNAME="donate.me.infc@gmail.com",
     MAIL_PASSWORD="duju iqcp glat eclz",
@@ -50,22 +51,32 @@ conf = ConnectionConfig(
 
 SECRET_KEY = os.getenv("SECRET_KEY", "mysecretkey")
 
-def validate_center_token(#validacion de los centros para crud de noticias
+from jwt import decode, ExpiredSignatureError, DecodeError
+from fastapi import HTTPException
+
+def validate_center_token(#validacion tokens de centros
     credentials: HTTPAuthorizationCredentials = Security(security)
 ):
     try:
+        # Obtener el token de las credenciales
         token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         
-        # Verificar si el token es de un usuario de tipo "center"
+        # Decodificar el token (sin el parámetro 'algorithms' directamente)
+        payload = decode(token, SECRET_KEY, algorithms=["HS256"])
+        
+        # Verificar si el token es de tipo "center"
         if payload.get("type") != "center":
             raise HTTPException(status_code=403, detail="No tienes permisos para esta acción")
         
-        return payload  # Retorna los datos del token si es válido
+        return payload  # Si es válido, devuelve los datos del token
+    
     except ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="El token ha expirado")
     except DecodeError:
         raise HTTPException(status_code=401, detail="Token inválido")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error inesperado: {str(e)}")
+
 
 class User(BaseModel):
     user_name: str
@@ -154,7 +165,7 @@ def generar_token_verificacion(email: str):
     return token
 
 async def enviar_correo_verificacion(email: str, token: str):
-    enlace_verificacion = f"http://localhost:8000/verificar-correo?token={token}"
+    enlace_verificacion = f"http://localhost:4200/verify_email?token={token}"
     mensaje = MessageSchema(
         subject="Confirma tu correo electrónico",
         recipients=[email],
@@ -171,12 +182,18 @@ async def enviar_correo_verificacion(email: str, token: str):
 def read_root():
     return {"message": "Hello world"}
 
-@app.get("/verificar-correo")
-async def verificar_correo(token: str):
+@app.post("/verificar-correo")
+async def verificar_correo(request: Request):
     try:
+        data = await request.json()
+        token = data.get("token")
+        if not token:
+            raise HTTPException(status_code=400, detail="Token no proporcionado")
+
         payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         email = payload["email"]
 
+        # Actualizar el estado en la base de datos
         conn = get_db_connection()
         cursor = conn.cursor()
         sql = """
@@ -188,12 +205,14 @@ async def verificar_correo(token: str):
         conn.commit()
         cursor.close()
         conn.close()
-        
+
         return {"message": "Correo verificado exitosamente"}
-    except ExpiredSignatureError:
-        raise HTTPException(status_code=400, detail="El token ha expirado")
-    except DecodeError:
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="Token expirado")
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=400, detail="Token inválido")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 @app.post("/register")
 async def register_user(
@@ -514,6 +533,132 @@ async def update_donor(
 
 # CRUD centers
 
+@app.get("/centers")  # Obtener todos los centros con nombre, dirección e imágenes
+async def get_all_centers():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+            FROM center
+        """)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(status_code=404, detail="No se encontraron centros.")
+        centers_data = [
+            {
+                "name": center[0],
+                "address": center[1],
+                "images": center[2]
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los centros: {str(e)}")
+
+@app.get("/centers/comunity")  # Obtener centros de tipo "comunity_center"
+async def get_comunity_centers():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+            FROM center
+            WHERE type_center = 'comunity_center'
+        """)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(status_code=404, detail="No se encontraron centros comunitarios.")
+        
+        centers_data = [
+            {
+                "name": center[0],
+                "address": center[1],
+                "images": center[2]
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"comunity_centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los centros comunitarios: {str(e)}")
+
+@app.get("/centers/bank")  # Obtener centros de tipo "food_bank"
+async def get_comunity_centers():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+            FROM center
+            WHERE type_center = 'food_bank'
+        """)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(status_code=404, detail="No se encontraron bancos de alimentos.")
+        
+        centers_data = [
+            {
+                "name": center[0],
+                "address": center[1],
+                "images": center[2]
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"comunity_centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los centros comunitarios: {str(e)}")
+
+@app.get("/centers/shelters")  # Obtener centros de tipo "childrens_shelters"
+async def get_comunity_centers():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+            FROM center
+            WHERE type_center = 'childrens_shelters'
+        """)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(status_code=404, detail="No se encontraron casas hogares.")
+        
+        centers_data = [
+            {
+                "name": center[0],
+                "address": center[1],
+                "images": center[2]
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"comunity_centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener los centros comunitarios: {str(e)}")
+
 @app.get("/center/{email}")#Traer centros por email
 async def get_center(email: str):
     try:
@@ -585,7 +730,9 @@ async def register_center(
     background_tasks: BackgroundTasks = BackgroundTasks(),
     image: Optional[UploadFile] = File(None)
 ):
+    print("Solicitud recibida")
     try:
+        print(f"Datos recibidos: user_name={user_name}, email={email}, type_center={type_center}")
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -598,15 +745,18 @@ async def register_center(
         
         image_url = None
         if image:
+            print(f"Archivo recibido: {image.filename}")
             image_path = UPLOAD_DIR / image.filename
             with image_path.open("wb") as buffer:
                 shutil.copyfileobj(image.file, buffer)
             image_url = f"/{UPLOAD_DIR}/{image.filename}"
+        else: print("No se recibió archivo.")
         
-        
+        type_center = type_center.strip().lower()
+        print(f"Valor normalizado de type_center: {type_center}")
         if type_center not in ['comunity_center', 'food_bank', 'childrens_shelters']:
+            print("Error: Tipo de centro inválido.")
             raise HTTPException(status_code=400, detail="Tipo de centro inválido.")
-        
         if needs and needs not in ['clothes', 'food', 'money']:
             raise HTTPException(status_code=400, detail="Necesidad inválida.")
         
@@ -621,7 +771,6 @@ async def register_center(
         )
         cursor.execute(sql, values)
         conn.commit()
-        
         token = generar_token_verificacion(email)
         background_tasks.add_task(enviar_correo_verificacion, email, token)
         
@@ -967,4 +1116,6 @@ async def delete_news(news_id: str, current_user: dict = Depends(validate_center
         return {"message": "News deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+token = generar_token_verificacion("example@example.com")
+decoded = jwt.decode(token, options={"verify_signature": False})
+print(decoded)
