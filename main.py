@@ -1549,3 +1549,146 @@ async def register_donation(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/donations/")
+async def get_donations(donor_id: str = None, need_id: str = None):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        base_query = "SELECT d.donation_id, d.donor_id, d.type_donation, d.comentary, d.image, a.amount, n.need_id, n.amount_requered FROM donations d INNER JOIN amount a ON d.donation_id = a.donation_fk INNER JOIN needss n ON a.needs_fk = n.need_id"
+        conditions = []
+        values = []
+
+        if donor_id:
+            conditions.append("d.donor_id = %s")
+            values.append(donor_id)
+        if need_id:
+            conditions.append("n.need_id = %s")
+            values.append(need_id)
+
+        if conditions:
+            base_query += " WHERE " + " AND ".join(conditions)
+
+        cursor.execute(base_query, tuple(values))
+        donations = cursor.fetchall()
+
+        # Formatear resultados
+        donations_list = [
+            {
+                "donation_id": donation[0],
+                "donor_id": donation[1],
+                "type_donation": donation[2],
+                "comentary": donation[3],
+                "image": donation[4],
+                "amount": donation[5],
+                "need_id": donation[6],
+                "amount_requered": donation[7],
+            }
+            for donation in donations
+        ]
+
+        cursor.close()
+        conn.close()
+
+        return donations_list
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/donations/{donation_id}")
+async def update_donation(
+    donation_id: str,
+    new_amount: int = Form(...),
+    comentary: str = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT a.amount, a.needs_fk, n.amount_requered, d.image FROM amount a INNER JOIN needss n ON a.needs_fk = n.need_id INNER JOIN donations d ON a.donation_fk = d.donation_id WHERE a.donation_fk = %s",
+            (donation_id,),
+        )
+        donation = cursor.fetchone()
+        if not donation:
+            raise HTTPException(status_code=404, detail="Donación no encontrada.")
+
+        old_amount, need_fk, current_amount_required, old_image = donation
+
+        new_amount_requered = current_amount_required + old_amount - new_amount
+        if new_amount_requered < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="El nuevo monto excede la necesidad restante.",
+            )
+
+        new_image_url = old_image  
+        if image:
+            UPLOAD_DIR = Path("uploaded_images")
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            new_image_url = f"/uploaded_images/{image.filename}"
+
+        update_donation_sql = """
+            UPDATE donations 
+            SET comentary = COALESCE(%s, comentary), image = %s
+            WHERE donation_id = %s
+        """
+        cursor.execute(update_donation_sql, (comentary, new_image_url, donation_id))
+
+        update_amount_sql = "UPDATE amount SET amount = %s WHERE donation_fk = %s"
+        cursor.execute(update_amount_sql, (new_amount, donation_id))
+
+        update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
+        cursor.execute(update_need_sql, (new_amount_requered, need_fk))
+
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {"message": "Donación actualizada exitosamente."}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/donations/{donation_id}")
+async def delete_donation(donation_id: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT a.amount, a.needs_fk, n.amount_requered FROM amount a INNER JOIN needss n ON a.needs_fk = n.need_id WHERE a.donation_fk = %s",
+            (donation_id,),
+        )
+        donation = cursor.fetchone()
+        if not donation:
+            raise HTTPException(status_code=404, detail="Donación no encontrada.")
+
+        amount, need_fk, current_amount_required = donation
+
+        new_amount_requered = current_amount_required + amount
+
+        cursor.execute("DELETE FROM amount WHERE donation_fk = %s", (donation_id,))
+        cursor.execute("DELETE FROM donations WHERE donation_id = %s", (donation_id,))
+
+        update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
+        cursor.execute(update_need_sql, (new_amount_requered, need_fk))
+
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {"message": "Donación eliminada exitosamente."}
+
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
