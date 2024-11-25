@@ -715,6 +715,57 @@ async def get_center(email: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/centerName/{user_name}")  # Traer centros por nombre (resumida)
+async def get_center(user_name: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT 
+                user_id, user_name, email, contact, addres, type_center, images 
+            FROM center 
+            WHERE user_name = %s
+        """, (user_name,))
+        center = cursor.fetchone()
+
+        if not center:
+            raise HTTPException(status_code=404, detail="Centro no encontrado.")
+
+        # Extraer el dato de contacto
+        contact = center[3]  # Campo compuesto
+        contact_phone_number = None
+        contact_social_media = None
+        contact_others = None
+
+        # Desempaquetar contact si tiene valores
+        if contact:
+            contact_data = contact.strip("()").split(",")  # Quitar paréntesis y dividir por comas
+            contact_phone_number = contact_data[0].strip() if contact_data[0].strip() else None
+            contact_social_media = contact_data[1].strip() if len(contact_data) > 1 and contact_data[1].strip() else None
+            contact_others = contact_data[2].strip() if len(contact_data) > 2 and contact_data[2].strip() else None
+
+        center_data = {
+            "user_id": center[0],
+            "user_name": center[1],
+            "email": center[2],
+            "contact": {
+                "phone_number": contact_phone_number,
+                "social_media": contact_social_media,
+                "others": contact_others,
+            },
+            "address": center[4],
+            "type_center": center[5],
+            "images": center[6]
+        }
+
+        cursor.close()
+        conn.close()
+        return {"center": center_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/registerCen")
 async def register_center(
     user_name: str = Form(...),
@@ -1461,6 +1512,59 @@ async def get_needs_by_center_name(user_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/getNeedsbyNT/{user_name}/{type_need}")
+async def get_needs_by_name_and_type(user_name: str, type_need: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Obtener el ID del centro basado en el nombre
+        cursor.execute("SELECT user_id FROM center WHERE user_name = %s", (user_name,))
+        center = cursor.fetchone()
+        if not center:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Centro con el nombre '{user_name}' no encontrado.",
+            )
+
+        center_id = center[0]
+
+        # Filtrar necesidades por el centro y el tipo de necesidad
+        cursor.execute(
+            "SELECT * FROM needss WHERE center_fk = %s AND need_type = %s",
+            (center_id, type_need),
+        )
+        needs = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not needs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontraron necesidades del tipo '{type_need}' para el centro '{user_name}'.",
+            )
+
+        needs_list = [
+            {
+                "need_id": need[0],
+                "center_fk": need[1],
+                "need_type": need[2],
+                "amount_required": need[3],
+                "complete": need[4],
+                "urgency": need[5],
+            }
+            for need in needs
+        ]
+
+        return {
+            "center_name": user_name,
+            "need_type": type_need,
+            "needs": needs_list,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 #Crud del diavlo
 
@@ -1692,3 +1796,251 @@ async def delete_donation(donation_id: str):
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/donations/ranking")#Traer el donante como la cantidad de donaciones completadas y enlistarlas de mayor a menor
+async def get_donation_ranking():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        ranking_sql = """
+        SELECT 
+            d.user_id AS donor_id,
+            COUNT(don.donation_id) AS total_donations
+        FROM 
+            donors d
+        LEFT JOIN 
+            donations don ON d.user_id = don.donor_id
+        WHERE 
+            don.complete = TRUE
+        GROUP BY 
+            d.user_id
+        ORDER BY 
+            total_donations DESC
+        """
+
+        cursor.execute(ranking_sql)
+        ranking = cursor.fetchall()
+
+        result = [{"donor_id": row[0], "total_donations": row[1]} for row in ranking]
+
+        cursor.close()
+        conn.close()
+
+        return {"ranking": result}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/centers/comunityNeeds/{need_type}/{urgency}", response_model=dict)  # Con filtros
+@app.get("/centers/comunityNeeds", response_model=dict)  # Sin filtros
+async def get_comunity_centers_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        # Validar que el need_type sea válido si está presente
+        valid_need_types = {"money", "food", "clothes"}
+        if need_type and need_type not in valid_need_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El tipo de necesidad '{need_type}' no es válido. Use uno de: {', '.join(valid_need_types)}"
+            )
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Construir la consulta base
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'comunity_center'
+        """
+        
+        # Agregar filtros dinámicos
+        filters = []
+        params = []
+        
+        if need_type:
+            filters.append("n.need_type = %s")
+            params.append(need_type)
+        
+        if urgency is not None:  # Urgencia explícita (True/False)
+            filters.append("n.urgency = %s")
+            params.append(urgency)
+        
+        # Combinar filtros en la consulta si existen
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        # Ejecutar la consulta
+        cursor.execute(base_query, tuple(params))
+        centers = cursor.fetchall()
+
+        # Validar resultados
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron centros comunitarios con los filtros especificados."
+            )
+
+        # Construir la respuesta
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        # Cerrar la conexión
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener los centros comunitarios con necesidades: {str(e)}"
+        )
+
+
+
+@app.get("/centers/bankNeeds/{need_type}/{urgency}", response_model=dict)  # Food_bank con filtro opcional
+@app.get("/centers/bankNeeds", response_model=dict)  # Food_bank sin filtro
+async def get_food_bank_centers_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'food_bank'
+        """
+        
+        filters = []
+        if need_type:
+            filters.append("n.need_type = %s")
+        if urgency is not None:
+            filters.append("n.urgency = %s")
+        
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        params = tuple(param for param in [need_type, urgency] if param is not None)
+        cursor.execute(base_query, params)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron bancos de alimentos con los filtros especificados."
+            )
+
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener los bancos de alimentos con necesidades: {str(e)}"
+        )
+
+
+@app.get("/centers/sheltersNeeds/{need_type}/{urgency}", response_model=dict)  # Childrens_shelters con filtro opcional
+@app.get("/centers/sheltersNeeds", response_model=dict)  # Childrens_shelters sin filtro
+async def get_shelters_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'childrens_shelters'
+        """
+        
+        filters = []
+        if need_type:
+            filters.append("n.need_type = %s")
+        if urgency is not None:
+            filters.append("n.urgency = %s")
+        
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        params = tuple(param for param in [need_type, urgency] if param is not None)
+        cursor.execute(base_query, params)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron casas hogares con los filtros especificados."
+            )
+
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener las casas hogares con necesidades: {str(e)}"
+        )
