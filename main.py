@@ -367,6 +367,40 @@ async def get_user(email: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/users")  # Traer todos los usuarios
+async def get_all_users():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+        """)
+        users = cursor.fetchall()
+
+        if not users:
+            raise HTTPException(status_code=404, detail="No se encontraron usuarios.")
+
+        users_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in users
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"users": users_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 #CRUD donors
 
@@ -2126,3 +2160,110 @@ async def get_shelters_with_needs(
             status_code=500,
             detail=f"Error al obtener las casas hogares con necesidades: {str(e)}"
         )
+
+@app.get("/users/sponsors")  # Traer todos los patrocinadores
+async def get_all_sponsors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+            WHERE is_sponsor = TRUE
+        """)
+        sponsors = cursor.fetchall()
+
+        if not sponsors:
+            raise HTTPException(status_code=404, detail="No se encontraron patrocinadores.")
+
+        sponsors_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in sponsors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"sponsors": sponsors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/users/sponsors3")  # Traer los tres primeros patrocinadores
+async def get_top_three_sponsors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+            WHERE is_sponsor = TRUE
+            ORDER BY user_id ASC
+            LIMIT 3
+        """)
+        top_sponsors = cursor.fetchall()
+
+        if not top_sponsors:
+            raise HTTPException(status_code=404, detail="No se encontraron patrocinadores.")
+
+        top_sponsors_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in top_sponsors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"top_sponsors": top_sponsors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/ConvertSponsor/{email}")#Convertir o quitar en sponsor a alguien (todo tipo de usuarios)
+async def toggle_sponsor_status(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Obtener el estado actual del donante
+        cursor.execute("SELECT is_sponsor FROM users WHERE email = %s", (email,))
+        donor = cursor.fetchone()
+        if not donor:
+            raise HTTPException(status_code=404, detail="Donante no encontrado.")
+        
+        # Alternar el valor de is_sponsor
+        new_status = not donor['is_sponsor']
+        
+        # Actualizar el valor en la base de datos
+        cursor.execute(
+            "UPDATE users SET is_sponsor = %s WHERE email = %s",
+            (new_status, email)
+        )
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+        
+        return {
+            "message": "Estado de patrocinador actualizado exitosamente.",
+            "email": email,
+            "is_sponsor": new_status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
