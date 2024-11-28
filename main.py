@@ -1575,7 +1575,7 @@ async def register_donation(
     type_donation: str = Form(...),
     comentary: str = Form(...),
     amount: int = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(None)  # Hacemos que la imagen sea opcional
 ):
     try:
         conn = get_db_connection()
@@ -1595,7 +1595,7 @@ async def register_donation(
         if type_donation not in valid_type_donation:
             raise HTTPException(status_code=400, detail=f"Tipo de donación inválido. Opciones válidas: {valid_type_donation}")
 
-        amount_required = need[3] 
+        amount_required = need[3]
         if amount > amount_required:
             raise HTTPException(
                 status_code=400,
@@ -1604,16 +1604,16 @@ async def register_donation(
 
         new_amount = amount_required - amount
 
-        if not image:
-            raise HTTPException(status_code=400, detail="Una imagen es requerida.")
+        image_url = None  # Inicializamos image_url como None por si no se sube imagen
 
-        UPLOAD_DIR = Path("uploaded_images") 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        if image:  # Procesamos la imagen solo si se proporciona
+            UPLOAD_DIR = Path("uploaded_images")
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-        image_path = UPLOAD_DIR / image.filename
-        with image_path.open("wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
-        image_url = f"/uploaded_images/{image.filename}"
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_url = f"/uploaded_images/{image.filename}"
 
         try:
             donation_sql = """
@@ -1659,7 +1659,7 @@ async def get_donations(donor_id: str = None, need_id: str = None):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        base_query = "SELECT d.donation_id, d.donor_id, d.type_donation, d.comentary, d.image, a.amount, n.need_id, n.amount_requered FROM donations d INNER JOIN amount a ON d.donation_id = a.donation_fk INNER JOIN needss n ON a.needs_fk = n.need_id"
+        base_query = "SELECT d.donation_id, d.donor_id, d.complete, d.type_donation, d.comentary, d.image, a.amount, n.need_id, n.amount_requered FROM donations d INNER JOIN amount a ON d.donation_id = a.donation_fk INNER JOIN needss n ON a.needs_fk = n.need_id"
         conditions = []
         values = []
 
@@ -1681,12 +1681,13 @@ async def get_donations(donor_id: str = None, need_id: str = None):
             {
                 "donation_id": donation[0],
                 "donor_id": donation[1],
-                "type_donation": donation[2],
-                "comentary": donation[3],
-                "image": donation[4],
-                "amount": donation[5],
-                "need_id": donation[6],
-                "amount_requered": donation[7],
+                "complete": donation[2],
+                "type_donation": donation[3],
+                "comentary": donation[4],
+                "image": donation[5],
+                "amount": donation[6],
+                "need_id": donation[7],
+                "amount_requered": donation[8],
             }
             for donation in donations
         ]
@@ -1761,6 +1762,48 @@ async def update_donation(
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/donationsComplete/{donation_id}")
+async def toggle_donation_complete(donation_id: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Verificar si la donación existe
+        cursor.execute(
+            "SELECT complete FROM donations WHERE donation_id = %s",
+            (donation_id,)
+        )
+        donation = cursor.fetchone()
+
+        if not donation:
+            raise HTTPException(status_code=404, detail="Donación no encontrada.")
+
+        current_complete = donation[0]
+
+        # Alternar el estado de 'complete'
+        new_complete = not current_complete
+
+        # Actualizar el estado en la base de datos
+        cursor.execute(
+            "UPDATE donations SET complete = %s WHERE donation_id = %s",
+            (new_complete, donation_id)
+        )
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "message": "Estado de 'complete' actualizado exitosamente.",
+            "donation_id": donation_id,
+            "new_complete": new_complete
+        }
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/donations/{donation_id}")
 async def delete_donation(donation_id: str):
     try:
@@ -1796,16 +1839,19 @@ async def delete_donation(donation_id: str):
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/donations/ranking")#Traer el donante como la cantidad de donaciones completadas y enlistarlas de mayor a menor
+@app.get("/donations/ranking")  # Traer el donante con la cantidad de donaciones completadas y enlistarlas de mayor a menor
 async def get_donation_ranking():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Obtener el ranking completo
         ranking_sql = """
         SELECT 
             d.user_id AS donor_id,
-            COUNT(don.donation_id) AS total_donations
+            COUNT(don.donation_id) AS total_donations,
+            d.images AS donor_image,
+            d.user_name As donor_name
         FROM 
             donors d
         LEFT JOIN 
@@ -1817,21 +1863,54 @@ async def get_donation_ranking():
         ORDER BY 
             total_donations DESC
         """
-
         cursor.execute(ranking_sql)
         ranking = cursor.fetchall()
 
-        result = [{"donor_id": row[0], "total_donations": row[1]} for row in ranking]
+        result = [{"donor_id": row[0], "total_donations": row[1], "donor_image": row[2], "donor_name":row[3]} for row in ranking]
+
+        # Obtener el usuario con más donaciones
+        top_donor_sql = """
+        SELECT 
+            d.user_id AS donor_id,
+            COUNT(don.donation_id) AS total_donations,
+            d.images AS donor_image,
+            d.user_name As donor_name
+        FROM 
+            donors d
+        LEFT JOIN 
+            donations don ON d.user_id = don.donor_id
+        WHERE 
+            don.complete = TRUE
+        GROUP BY 
+            d.user_id
+        ORDER BY 
+            total_donations DESC
+        LIMIT 1
+        """
+        cursor.execute(top_donor_sql)
+        top_donor = cursor.fetchone()
+
+        top_donor_info = None
+        if top_donor:
+            top_donor_info = {
+                "donor_id": top_donor[0],
+                "total_donations": top_donor[1],
+                "donor_image": top_donor[2],
+                "donor_name": top_donor[3]
+            }
 
         cursor.close()
         conn.close()
 
-        return {"ranking": result}
+        return {
+            "ranking": result,
+            "top_donor": top_donor_info
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/centers/comunityNeeds/{need_type}/{urgency}", response_model=dict)  # Con filtros
+@app.get("/centers/comunityNeeds/{need_type}/{urgency}", response_model=dict)  # Con filtros (CUANDO SE INSTANCIE, ESTOS METODOS NECESITAN NUEVA UPDATE)
 @app.get("/centers/comunityNeeds", response_model=dict)  # Sin filtros
 async def get_comunity_centers_with_needs(
     need_type: str | None = None, 
@@ -1861,6 +1940,7 @@ async def get_comunity_centers_with_needs(
             FROM center c
             JOIN needss n ON c.user_id = n.center_fk
             WHERE c.type_center = 'comunity_center'
+            AND n.amount_requered > 0
         """
         
         # Agregar filtros dinámicos
@@ -1937,6 +2017,7 @@ async def get_food_bank_centers_with_needs(
             FROM center c
             JOIN needss n ON c.user_id = n.center_fk
             WHERE c.type_center = 'food_bank'
+            AND n.amount_requered > 0
         """
         
         filters = []
@@ -2002,6 +2083,7 @@ async def get_shelters_with_needs(
             FROM center c
             JOIN needss n ON c.user_id = n.center_fk
             WHERE c.type_center = 'childrens_shelters'
+            AND n.amount_requered > 0
         """
         
         filters = []
