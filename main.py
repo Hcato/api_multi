@@ -293,9 +293,10 @@ def login(usr: LoginRequest):
             "name": user_record[1],
             "email": user_record[2],
             "is_verified": user_record[4],
-            "is_admin": user_record[5],
-            "is_sponsor": user_record[6]
+            "is_admin": user_record[5]
         }
+        images =  user_record[6]
+        is_sponsor= user_record[7]
         conn.close()
         
         token = jwt.encode(
@@ -304,7 +305,7 @@ def login(usr: LoginRequest):
             algorithm="HS256"
         )
         
-        return {"access_token": token, "token_type": "bearer", "user_type": user_type, "user": user_data}
+        return {"access_token": token, "token_type": "bearer", "user_type": user_type, "images": images,  "user": user_data, "is_sponsor": is_sponsor}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -345,6 +346,39 @@ async def get_user(email: str):
             FROM users 
             WHERE email = %s
         """, (email,))
+        user = cursor.fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+        user_data = {
+            "user_id": user[0],
+            "user_name": user[1],
+            "email": user[2],
+            "is_verified": user[3],
+            "is_admin": user[4],
+            "is_sponsor": user[5],
+            "images": user[6],
+        }
+
+        cursor.close()
+        conn.close()
+        return {"user": user_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/userId/{user_id}") #traer usuarios por id (version resumida)
+async def get_user(user_id: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images 
+            FROM users 
+            WHERE user_id = %s
+        """, (user_id,))
         user = cursor.fetchone()
 
         if not user:
@@ -1734,19 +1768,74 @@ async def get_donations(donor_id: str = None, need_id: str = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/donations/{donor_id}")
+async def get_donations_by_donor(donor_id: str):
+    try:
+        # Conexión a la base de datos
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Consulta SQL para obtener todas las donaciones del usuario por su donor_id
+        query = """
+        SELECT 
+            d.donation_id, 
+            d.donor_id, 
+            d.complete, 
+            d.type_donation, 
+            d.comentary, 
+            d.image, 
+            a.amount, 
+            n.need_id, 
+            n.amount_requered
+        FROM donations d
+        INNER JOIN amount a ON d.donation_id = a.donation_fk
+        INNER JOIN needss n ON a.needs_fk = n.need_id
+        WHERE d.donor_id = %s
+        """
+        cursor.execute(query, (donor_id,))
+        donations = cursor.fetchall()
+
+        # Formatear resultados
+        donations_list = [
+            {
+                "donation_id": donation[0],
+                "donor_id": donation[1],
+                "complete": donation[2],
+                "type_donation": donation[3],
+                "comentary": donation[4],
+                "image": donation[5],
+                "amount": donation[6],
+                "need_id": donation[7],
+                "amount_requered": donation[8],
+            }
+            for donation in donations
+        ]
+
+        # Cerrar cursor y conexión
+        cursor.close()
+        conn.close()
+
+        return donations_list
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.put("/donations/{donation_id}")
 async def update_donation(
     donation_id: str,
-    new_amount: int = Form(...),
-    comentary: str = Form(None),
-    image: Optional[UploadFile] = File(None)
+    new_amount: Optional[int] = Form(None),  # Hacemos que el nuevo monto sea opcional
+    comentary: Optional[str] = Form(None),  # Comentario es opcional
+    image: Optional[UploadFile] = File(None)  # Imagen es opcional
 ):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT a.amount, a.needs_fk, n.amount_requered, d.image FROM amount a INNER JOIN needss n ON a.needs_fk = n.need_id INNER JOIN donations d ON a.donation_fk = d.donation_id WHERE a.donation_fk = %s",
+            "SELECT a.amount, a.needs_fk, n.amount_requered, d.image FROM amount a "
+            "INNER JOIN needss n ON a.needs_fk = n.need_id "
+            "INNER JOIN donations d ON a.donation_fk = d.donation_id "
+            "WHERE a.donation_fk = %s",
             (donation_id,),
         )
         donation = cursor.fetchone()
@@ -1755,14 +1844,25 @@ async def update_donation(
 
         old_amount, need_fk, current_amount_required, old_image = donation
 
-        new_amount_requered = current_amount_required + old_amount - new_amount
-        if new_amount_requered < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="El nuevo monto excede la necesidad restante.",
-            )
+        # Si se proporciona un nuevo monto, actualizamos el monto y la necesidad
+        if new_amount is not None:
+            new_amount_requered = current_amount_required + old_amount - new_amount
+            if new_amount_requered < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El nuevo monto excede la necesidad restante.",
+                )
 
-        new_image_url = old_image  
+            # Actualizamos el monto de la donación
+            update_amount_sql = "UPDATE amount SET amount = %s WHERE donation_fk = %s"
+            cursor.execute(update_amount_sql, (new_amount, donation_id))
+
+            # Actualizamos el monto requerido en la necesidad
+            update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
+            cursor.execute(update_need_sql, (new_amount_requered, need_fk))
+
+        # Si se proporciona una nueva imagen, actualizamos la imagen
+        new_image_url = old_image
         if image:
             UPLOAD_DIR = Path("uploaded_images")
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -1772,18 +1872,13 @@ async def update_donation(
                 shutil.copyfileobj(image.file, buffer)
             new_image_url = f"/uploaded_images/{image.filename}"
 
+        # Si se proporciona un nuevo comentario, lo actualizamos
         update_donation_sql = """
             UPDATE donations 
             SET comentary = COALESCE(%s, comentary), image = %s
             WHERE donation_id = %s
         """
         cursor.execute(update_donation_sql, (comentary, new_image_url, donation_id))
-
-        update_amount_sql = "UPDATE amount SET amount = %s WHERE donation_fk = %s"
-        cursor.execute(update_amount_sql, (new_amount, donation_id))
-
-        update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
-        cursor.execute(update_need_sql, (new_amount_requered, need_fk))
 
         conn.commit()
 
@@ -1873,65 +1968,48 @@ async def delete_donation(donation_id: str):
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/donations/ranking")  # Traer el donante con la cantidad de donaciones completadas y enlistarlas de mayor a menor
+@app.get("/donationsRan/ranking")
 async def get_donation_ranking():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Obtener el ranking completo
         ranking_sql = """
         SELECT 
             d.user_id AS donor_id,
-            COUNT(don.donation_id) AS total_donations,
+            COALESCE(COUNT(don.donation_id), 0) AS total_donations,
             d.images AS donor_image,
-            d.user_name As donor_name
+            d.user_name AS donor_name,
+            d.is_sponsor  
         FROM 
             donors d
         LEFT JOIN 
             donations don ON d.user_id = don.donor_id
-        WHERE 
-            don.complete = TRUE
+            AND don.complete = TRUE
         GROUP BY 
-            d.user_id
-        ORDER BY 
-            total_donations DESC
+            d.user_id, d.is_sponsor, d.images, d.user_name
         """
         cursor.execute(ranking_sql)
         ranking = cursor.fetchall()
 
-        result = [{"donor_id": row[0], "total_donations": row[1], "donor_image": row[2], "donor_name":row[3]} for row in ranking]
+        if not ranking:
+            raise HTTPException(status_code=404, detail="No se encontraron donantes.")
 
-        # Obtener el usuario con más donaciones
-        top_donor_sql = """
-        SELECT 
-            d.user_id AS donor_id,
-            COUNT(don.donation_id) AS total_donations,
-            d.images AS donor_image,
-            d.user_name As donor_name
-        FROM 
-            donors d
-        LEFT JOIN 
-            donations don ON d.user_id = don.donor_id
-        WHERE 
-            don.complete = TRUE
-        GROUP BY 
-            d.user_id
-        ORDER BY 
-            total_donations DESC
-        LIMIT 1
-        """
-        cursor.execute(top_donor_sql)
-        top_donor = cursor.fetchone()
+        result = []
+        for row in ranking:
+            donor_id, total_donations, donor_image, donor_name, is_sponsor = row
+            if is_sponsor:
+                total_donations += 10
+            result.append({
+                "donor_id": donor_id,
+                "total_donations": total_donations,
+                "donor_image": donor_image,
+                "donor_name": donor_name
+            })
 
-        top_donor_info = None
-        if top_donor:
-            top_donor_info = {
-                "donor_id": top_donor[0],
-                "total_donations": top_donor[1],
-                "donor_image": top_donor[2],
-                "donor_name": top_donor[3]
-            }
+        result = sorted(result, key=lambda x: x['total_donations'], reverse=True)
+
+        top_donor_info = result[0] if result else None
 
         cursor.close()
         conn.close()
@@ -1943,6 +2021,8 @@ async def get_donation_ranking():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/centers/comunityNeeds/{need_type}/{urgency}", response_model=dict)  # Con filtros (CUANDO SE INSTANCIE, ESTOS METODOS NECESITAN NUEVA UPDATE)
 @app.get("/centers/comunityNeeds", response_model=dict)  # Sin filtros
@@ -2242,7 +2322,7 @@ async def toggle_sponsor_status(email: str):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         # Obtener el estado actual del donante
-        cursor.execute("SELECT is_sponsor FROM users WHERE email = %s", (email,))
+        cursor.execute("SELECT is_sponsor FROM donors WHERE email = %s", (email,))
         donor = cursor.fetchone()
         if not donor:
             raise HTTPException(status_code=404, detail="Donante no encontrado.")
@@ -2252,7 +2332,7 @@ async def toggle_sponsor_status(email: str):
         
         # Actualizar el valor en la base de datos
         cursor.execute(
-            "UPDATE users SET is_sponsor = %s WHERE email = %s",
+            "UPDATE donors SET is_sponsor = %s WHERE email = %s",
             (new_status, email)
         )
         conn.commit()
@@ -2265,5 +2345,35 @@ async def toggle_sponsor_status(email: str):
             "email": email,
             "is_sponsor": new_status
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/deleteCenter/{email}")#Eliminar usuarios tipo centros, (se conservan las donaciones indicando como null al borrar sus datos de amount)
+async def delete_center(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT user_id FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+        
+        cursor.execute("SELECT need_id FROM needss WHERE center_fk = %s", (user['user_id'],))
+        needs = cursor.fetchall()
+
+        if needs:
+            for need in needs:
+                cursor.execute("UPDATE amount SET needs_fk = NULL WHERE needs_fk = %s", (need['need_id'],))
+
+        cursor.execute("DELETE FROM needss WHERE center_fk = %s", (user['user_id'],))
+
+        cursor.execute("DELETE FROM users WHERE email = %s", (email,))
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+        
+        return {"message": "Centro y sus necesidades eliminados exitosamente, donaciones conservadas."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
