@@ -99,7 +99,14 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
-
+def get_db_connection():
+    return psycopg2.connect(
+        host=os.getenv('DB_HOST'),
+        user=os.getenv('DB_USER'),
+        password=os.getenv('DB_PASSWORD'),
+        database=os.getenv('DB_NAME'),
+        port=os.getenv('DB_PORT')
+    )
 class News(BaseModel):
     id: Optional[str] = Field(alias="_id")  # El _id de MongoDB
     title: str
@@ -110,14 +117,7 @@ class News(BaseModel):
     author: str  # ID del autor (puede ser el ID del usuario "center")
 
 
-def get_db_connection():
-    return psycopg2.connect(
-        host=os.getenv('DB_HOST'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        database=os.getenv('DB_NAME'),
-        port=os.getenv('DB_PORT')
-    )
+
     
 def get_mongo_client():#Conectar con mongo(mongodbAtlas)
     mongo_uri = os.getenv("MONGO_URI")
@@ -601,25 +601,27 @@ async def update_donor(
 
 # CRUD centers
 
-@app.get("/centers")  # Obtener todos los centros con nombre, dirección e imágenes
+@app.get("/centers")  # Obtener todos los centros con nombre, dirección, email e imágenes
 async def get_all_centers():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT 
-                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+                user_name, email, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
             FROM center
         """)
         centers = cursor.fetchall()
 
         if not centers:
             raise HTTPException(status_code=404, detail="No se encontraron centros.")
+        
         centers_data = [
             {
                 "name": center[0],
-                "address": center[1],
-                "images": center[2]
+                "email": center[1],  # Agregar email a los datos para poder eliminar un centro
+                "address": center[2],
+                "images": center[3]
             }
             for center in centers
         ]
@@ -2375,5 +2377,317 @@ async def delete_center(email: str):
         conn.close()
         
         return {"message": "Centro y sus necesidades eliminados exitosamente, donaciones conservadas."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# le añadí esto para poder separar a los usuarios donantes de los centros 
+@app.get("/donors")  # Obtener todos los donantes
+async def get_all_donors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT user_id, user_name, last_name, email, phone_numer, is_verified, is_admin, is_sponsor, images
+            FROM donors
+        """)
+        donors = cursor.fetchall()
+
+        if not donors:
+            raise HTTPException(status_code=404, detail="No hay donantes registrados.")
+
+        donors_data = [
+            {
+                "user_id": donor[0],
+                "user_name": donor[1],
+                "last_name": donor[2],
+                "email": donor[3],
+                "phone_numer": donor[4], # le cambie el nombre pq en la tabla de la bd estaba escrito así
+                "is_verified": donor[5],
+                "is_admin": donor[6],
+                "is_sponsor": donor[7],
+                "images": donor[8],
+            }
+            for donor in donors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"donors": donors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#crud news (in mongodb)
+@app.post("/news", dependencies=[Depends(validate_center_token)])
+async def create_news(
+    title: str = Form(...),
+    content: str = Form(...),
+    status: Literal["urgent", "priority", "events", "common"] = Form(...),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)  # Obtén los datos del usuario autenticado
+):
+    try:
+        # Subir la imagen si se proporciona
+        image_url = None
+        if image:
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_url = f"/uploaded_images/{image.filename}"
+
+        # Crear el documento de la noticia
+        news_data = {
+            "title": title,
+            "content": content,
+            "public_date": datetime.utcnow(),
+            "image": image_url,
+            "status": status,
+            "author": current_user["sub"],  # Email del autor desde el token
+        }
+
+        # Insertar en MongoDB
+        result = news_collection.insert_one(news_data)
+        return {"message": "News created successfully", "news_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def update_news(
+    news_id: str,
+    new_title: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
+    status: Optional[Literal["urgent", "priority", "events"]] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)
+):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para actualizar esta noticia")
+
+        # Actualizar los campos proporcionados
+        update_data = {}
+        if new_title:
+            update_data["title"] = new_title
+        if content:
+            update_data["content"] = content
+        if status:
+            update_data["status"] = status
+        if image:
+            # Subir la nueva imagen
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            update_data["image"] = f"/uploaded_images/{image.filename}"
+
+        # Actualizar en MongoDB
+        result = news_collection.update_one({"_id": ObjectId(news_id)}, {"$set": update_data})
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def delete_news(news_id: str, current_user: dict = Depends(validate_center_token)):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para eliminar esta noticia")
+
+        # Eliminar la noticia
+        result = news_collection.delete_one({"_id": ObjectId(news_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/news/special", dependencies=[Depends(validate_center_token)])#crear las noticias especiales
+async def create_special_news(
+    title: str = Form(...),
+    image: UploadFile = File(...),
+    current_user: dict = Depends(validate_center_token)  # Obtener los datos del usuario autenticado
+):
+    try:
+        # Verificar y subir la imagen
+        if not image:
+            raise HTTPException(status_code=400, detail="An image is required")
+        
+        image_path = UPLOAD_DIR / image.filename
+        with image_path.open("wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+        image_url = f"/uploaded_images/{image.filename}"
+
+        news_data = {
+            "title": title,
+            "public_date": datetime.utcnow(),
+            "image": image_url,
+            "status": "event",  
+            "author": current_user["sub"],  # Email del autor desde el token
+        }
+
+        # Insertar en MongoDB
+        result = news_collection.insert_one(news_data)
+        return {"message": "Simple news created successfully", "news_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/special")#traer las noticias que apareceran arriba (solo imagenes y su estatus varia)
+async def get_event_news(
+    page: int = Query(1, ge=1), 
+    page_size: int = Query(10, ge=1, le=100)
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Filtrar noticias con status "event" y obtener resultados paginados
+        events = list(
+            news_collection.find({"status": "event"})
+            .skip(skip)
+            .limit(limit)
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for event in events:
+            event["_id"] = str(event["_id"])
+
+        # Contar el total de documentos con status "event"
+        total_events = news_collection.count_documents({"status": "event"})
+
+        return {
+            "message": "Event news retrieved successfully",
+            "total": total_events,
+            "page": page,
+            "page_size": page_size,
+            "data": events,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/secret") #llamar news de donateme (las principales)
+async def get_secret_news(
+    page: int = Query(1, ge=1), 
+    page_size: int = Query(10, ge=1, le=100)
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Filtrar noticias con status "event" y obtener resultados paginados
+        events = list(
+            news_collection.find({"status": "admin"})
+            .skip(skip)
+            .limit(limit)
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for event in events:
+            event["_id"] = str(event["_id"])
+
+        # Contar el total de documentos con status "event"
+        total_events = news_collection.count_documents({"status": "event"})
+
+        return {
+            "message": "Event news retrieved successfully",
+            "data": events,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news")
+async def get_all_news(
+    center_email: str = None,  # Parámetro opcional para filtrar por correo del centro
+    page: int = Query(1, ge=1),  # Página por defecto 1, y mayor o igual a 1
+    page_size: int = Query(10, ge=1, le=100)  # Tamaño de página por defecto 10, entre 1 y 100
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Crear el filtro para las noticias por autor (correo del centro)
+        filter = {}
+        if center_email:
+            filter["author"] = center_email  # Asumimos que 'author' es el campo que guarda el correo del centro
+
+        # Obtener las noticias con paginación y filtro por autor (correo del centro)
+        news = list(
+            news_collection.find(filter)  # Filtra por correo del centro
+            .skip(skip)  # Descartar los documentos anteriores a la página actual
+            .limit(limit)  # Limitar los resultados al tamaño de la página
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for news_item in news:
+            news_item["_id"] = str(news_item["_id"])
+
+        # Contar el total de documentos en la colección filtrados
+        total_news = news_collection.count_documents(filter)  # Total de noticias filtradas por correo del centro
+
+        # Preparar la respuesta
+        return {
+            "message": "News retrieved successfully",
+            "total": total_news,
+            "page": page,
+            "page_size": page_size,
+            "data": news,  # Los datos de las noticias
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/with_content")
+async def get_news_with_content(
+    center_email: str = None,  # Parámetro opcional para filtrar por correo del centro
+    page: int = Query(1, ge=1),  # Página por defecto 1, y mayor o igual a 1
+    page_size: int = Query(10, ge=1, le=100)  # Tamaño de página por defecto 10, entre 1 y 100
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Crear el filtro para las noticias por autor (correo del centro) y que tengan contenido
+        filter = {"content": {"$exists": True, "$ne": ""}}
+        if center_email:
+            filter["author"] = center_email  # Asumimos que 'author' es el campo que guarda el correo del centro
+
+        # Obtener las noticias con paginación, filtro por autor (correo del centro) y contenido no vacío
+        news = list(
+            news_collection.find(filter)  # Filtra por correo del centro y contenido no vacío
+            .skip(skip)  # Descartar los documentos anteriores a la página actual
+            .limit(limit)  # Limitar los resultados al tamaño de la página
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for news_item in news:
+            news_item["_id"] = str(news_item["_id"])
+
+        # Contar el total de documentos en la colección filtrados
+        total_news = news_collection.count_documents(filter)  # Total de noticias filtradas por correo del centro y contenido no vacío
+
+        # Preparar la respuesta
+        return {
+            "message": "News with content retrieved successfully",
+            "total": total_news,
+            "page": page,
+            "page_size": page_size,
+            "data": news,  # Los datos de las noticias
+        }
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
