@@ -118,6 +118,14 @@ def get_db_connection():
         database=os.getenv('DB_NAME'),
         port=os.getenv('DB_PORT')
     )
+class News(BaseModel):
+    id: Optional[str] = Field(alias="_id")  # El _id de MongoDB
+    title: str
+    content: str
+    public_date: datetime = Field(default_factory=datetime.utcnow)
+    image: Optional[str] = None
+    status: Literal["urgent", "priority", "events"]
+    author: str  # ID del autor (puede ser el ID del usuario "center")
     
 def get_mongo_client():#Conectar con mongo(mongodbAtlas)
     mongo_uri = os.getenv("MONGO_URI")
@@ -293,9 +301,10 @@ def login(usr: LoginRequest):
             "name": user_record[1],
             "email": user_record[2],
             "is_verified": user_record[4],
-            "is_admin": user_record[5],
-            "is_sponsor": user_record[6]
+            "is_admin": user_record[5]
         }
+        images =  user_record[6]
+        is_sponsor= user_record[7]
         conn.close()
         
         token = jwt.encode(
@@ -304,7 +313,7 @@ def login(usr: LoginRequest):
             algorithm="HS256"
         )
         
-        return {"access_token": token, "token_type": "bearer", "user_type": user_type, "user": user_data}
+        return {"access_token": token, "token_type": "bearer", "user_type": user_type, "images": images,  "user": user_data, "is_sponsor": is_sponsor}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -367,6 +376,73 @@ async def get_user(email: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/userId/{user_id}") #traer usuarios por id (version resumida)
+async def get_user(user_id: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images 
+            FROM users 
+            WHERE user_id = %s
+        """, (user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+
+        user_data = {
+            "user_id": user[0],
+            "user_name": user[1],
+            "email": user[2],
+            "is_verified": user[3],
+            "is_admin": user[4],
+            "is_sponsor": user[5],
+            "images": user[6],
+        }
+
+        cursor.close()
+        conn.close()
+        return {"user": user_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/users")  # Traer todos los usuarios
+async def get_all_users():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+        """)
+        users = cursor.fetchall()
+
+        if not users:
+            raise HTTPException(status_code=404, detail="No se encontraron usuarios.")
+
+        users_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in users
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"users": users_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 #CRUD donors
 
@@ -533,25 +609,27 @@ async def update_donor(
 
 # CRUD centers
 
-@app.get("/centers")  # Obtener todos los centros con nombre, dirección e imágenes
+@app.get("/centers")  # Obtener todos los centros con nombre, dirección, email e imágenes
 async def get_all_centers():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT 
-                user_name, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
+                user_name, email, addres, CONCAT('http://127.0.0.1:8000', images) AS images 
             FROM center
         """)
         centers = cursor.fetchall()
 
         if not centers:
             raise HTTPException(status_code=404, detail="No se encontraron centros.")
+        
         centers_data = [
             {
                 "name": center[0],
-                "address": center[1],
-                "images": center[2]
+                "email": center[1],  # Agregar email a los datos para poder eliminar un centro
+                "address": center[2],
+                "images": center[3]
             }
             for center in centers
         ]
@@ -708,6 +786,57 @@ async def get_center(email: str):
             "donations": center[10],
             "images": center[11],
         }
+        cursor.close()
+        conn.close()
+        return {"center": center_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/centerName/{user_name}")  # Traer centros por nombre (resumida)
+async def get_center(user_name: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT 
+                user_id, user_name, email, contact, addres, type_center, images 
+            FROM center 
+            WHERE user_name = %s
+        """, (user_name,))
+        center = cursor.fetchone()
+
+        if not center:
+            raise HTTPException(status_code=404, detail="Centro no encontrado.")
+
+        # Extraer el dato de contacto
+        contact = center[3]  # Campo compuesto
+        contact_phone_number = None
+        contact_social_media = None
+        contact_others = None
+
+        # Desempaquetar contact si tiene valores
+        if contact:
+            contact_data = contact.strip("()").split(",")  # Quitar paréntesis y dividir por comas
+            contact_phone_number = contact_data[0].strip() if contact_data[0].strip() else None
+            contact_social_media = contact_data[1].strip() if len(contact_data) > 1 and contact_data[1].strip() else None
+            contact_others = contact_data[2].strip() if len(contact_data) > 2 and contact_data[2].strip() else None
+
+        center_data = {
+            "user_id": center[0],
+            "user_name": center[1],
+            "email": center[2],
+            "contact": {
+                "phone_number": contact_phone_number,
+                "social_media": contact_social_media,
+                "others": contact_others,
+            },
+            "address": center[4],
+            "type_center": center[5],
+            "images": center[6]
+        }
+
         cursor.close()
         conn.close()
         return {"center": center_data}
@@ -1461,6 +1590,58 @@ async def get_needs_by_center_name(user_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/getNeedsbyNT/{user_name}/{type_need}")
+async def get_needs_by_name_and_type(user_name: str, type_need: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Obtener el ID del centro basado en el nombre
+        cursor.execute("SELECT user_id FROM center WHERE user_name = %s", (user_name,))
+        center = cursor.fetchone()
+        if not center:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Centro con el nombre '{user_name}' no encontrado.",
+            )
+
+        center_id = center[0]
+
+        # Filtrar necesidades por el centro y el tipo de necesidad
+        cursor.execute(
+            "SELECT * FROM needss WHERE center_fk = %s AND need_type = %s",
+            (center_id, type_need),
+        )
+        needs = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+
+        if not needs:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontraron necesidades del tipo '{type_need}' para el centro '{user_name}'.",
+            )
+
+        needs_list = [
+            {
+                "need_id": need[0],
+                "center_fk": need[1],
+                "need_type": need[2],
+                "amount_required": need[3],
+                "complete": need[4],
+                "urgency": need[5],
+            }
+            for need in needs
+        ]
+
+        return {
+            "center_name": user_name,
+            "need_type": type_need,
+            "needs": needs_list,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 #Crud del diavlo
 
@@ -1471,7 +1652,7 @@ async def register_donation(
     type_donation: str = Form(...),
     comentary: str = Form(...),
     amount: int = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(None)  # Hacemos que la imagen sea opcional
 ):
     try:
         conn = get_db_connection()
@@ -1491,7 +1672,7 @@ async def register_donation(
         if type_donation not in valid_type_donation:
             raise HTTPException(status_code=400, detail=f"Tipo de donación inválido. Opciones válidas: {valid_type_donation}")
 
-        amount_required = need[3] 
+        amount_required = need[3]
         if amount > amount_required:
             raise HTTPException(
                 status_code=400,
@@ -1500,16 +1681,16 @@ async def register_donation(
 
         new_amount = amount_required - amount
 
-        if not image:
-            raise HTTPException(status_code=400, detail="Una imagen es requerida.")
+        image_url = None  # Inicializamos image_url como None por si no se sube imagen
 
-        UPLOAD_DIR = Path("uploaded_images") 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        if image:  # Procesamos la imagen solo si se proporciona
+            UPLOAD_DIR = Path("uploaded_images")
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-        image_path = UPLOAD_DIR / image.filename
-        with image_path.open("wb") as buffer:
-            shutil.copyfileobj(image.file, buffer)
-        image_url = f"/uploaded_images/{image.filename}"
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_url = f"/uploaded_images/{image.filename}"
 
         try:
             donation_sql = """
@@ -1555,7 +1736,7 @@ async def get_donations(donor_id: str = None, need_id: str = None):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        base_query = "SELECT d.donation_id, d.donor_id, d.type_donation, d.comentary, d.image, a.amount, n.need_id, n.amount_requered FROM donations d INNER JOIN amount a ON d.donation_id = a.donation_fk INNER JOIN needss n ON a.needs_fk = n.need_id"
+        base_query = "SELECT d.donation_id, d.donor_id, d.complete, d.type_donation, d.comentary, d.image, a.amount, n.need_id, n.amount_requered FROM donations d INNER JOIN amount a ON d.donation_id = a.donation_fk INNER JOIN needss n ON a.needs_fk = n.need_id"
         conditions = []
         values = []
 
@@ -1577,12 +1758,64 @@ async def get_donations(donor_id: str = None, need_id: str = None):
             {
                 "donation_id": donation[0],
                 "donor_id": donation[1],
-                "type_donation": donation[2],
-                "comentary": donation[3],
-                "image": donation[4],
-                "amount": donation[5],
-                "need_id": donation[6],
-                "amount_requered": donation[7],
+                "complete": donation[2],
+                "type_donation": donation[3],
+                "comentary": donation[4],
+                "image": donation[5],
+                "amount": donation[6],
+                "need_id": donation[7],
+                "amount_requered": donation[8],
+            }
+            for donation in donations
+        ]
+
+        cursor.close()
+        conn.close()
+
+        return donations_list
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/donations/{donor_id}")
+async def get_donations_by_donor(donor_id: str):
+    try:
+        # Conexión a la base de datos
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Consulta SQL para obtener todas las donaciones del usuario por su donor_id
+        query = """
+        SELECT 
+            d.donation_id, 
+            d.donor_id, 
+            d.complete, 
+            d.type_donation, 
+            d.comentary, 
+            d.image, 
+            a.amount, 
+            n.need_id, 
+            n.amount_requered
+        FROM donations d
+        INNER JOIN amount a ON d.donation_id = a.donation_fk
+        INNER JOIN needss n ON a.needs_fk = n.need_id
+        WHERE d.donor_id = %s
+        """
+        cursor.execute(query, (donor_id,))
+        donations = cursor.fetchall()
+
+        # Formatear resultados
+        donations_list = [
+            {
+                "donation_id": donation[0],
+                "donor_id": donation[1],
+                "complete": donation[2],
+                "type_donation": donation[3],
+                "comentary": donation[4],
+                "image": donation[5],
+                "amount": donation[6],
+                "need_id": donation[7],
+                "amount_requered": donation[8],
             }
             for donation in donations
         ]
@@ -1598,16 +1831,20 @@ async def get_donations(donor_id: str = None, need_id: str = None):
 @app.put("/donations/{donation_id}")
 async def update_donation(
     donation_id: str,
-    new_amount: int = Form(...),
-    comentary: str = Form(None),
-    image: Optional[UploadFile] = File(None)
+
+    new_amount: Optional[int] = Form(None),  # Hacemos que el nuevo monto sea opcional
+    comentary: Optional[str] = Form(None),  # Comentario es opcional
+    image: Optional[UploadFile] = File(None)  # Imagen es opcional
 ):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT a.amount, a.needs_fk, n.amount_requered, d.image FROM amount a INNER JOIN needss n ON a.needs_fk = n.need_id INNER JOIN donations d ON a.donation_fk = d.donation_id WHERE a.donation_fk = %s",
+            "SELECT a.amount, a.needs_fk, n.amount_requered, d.image FROM amount a "
+            "INNER JOIN needss n ON a.needs_fk = n.need_id "
+            "INNER JOIN donations d ON a.donation_fk = d.donation_id "
+            "WHERE a.donation_fk = %s",
             (donation_id,),
         )
         donation = cursor.fetchone()
@@ -1616,14 +1853,25 @@ async def update_donation(
 
         old_amount, need_fk, current_amount_required, old_image = donation
 
-        new_amount_requered = current_amount_required + old_amount - new_amount
-        if new_amount_requered < 0:
-            raise HTTPException(
-                status_code=400,
-                detail="El nuevo monto excede la necesidad restante.",
-            )
+        # Si se proporciona un nuevo monto, actualizamos el monto y la necesidad
+        if new_amount is not None:
+            new_amount_requered = current_amount_required + old_amount - new_amount
+            if new_amount_requered < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="El nuevo monto excede la necesidad restante.",
+                )
 
-        new_image_url = old_image  
+            # Actualizamos el monto de la donación
+            update_amount_sql = "UPDATE amount SET amount = %s WHERE donation_fk = %s"
+            cursor.execute(update_amount_sql, (new_amount, donation_id))
+
+            # Actualizamos el monto requerido en la necesidad
+            update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
+            cursor.execute(update_need_sql, (new_amount_requered, need_fk))
+
+        # Si se proporciona una nueva imagen, actualizamos la imagen
+        new_image_url = old_image
         if image:
             UPLOAD_DIR = Path("uploaded_images")
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -1640,12 +1888,6 @@ async def update_donation(
         """
         cursor.execute(update_donation_sql, (comentary, new_image_url, donation_id))
 
-        update_amount_sql = "UPDATE amount SET amount = %s WHERE donation_fk = %s"
-        cursor.execute(update_amount_sql, (new_amount, donation_id))
-
-        update_need_sql = "UPDATE needss SET amount_requered = %s WHERE need_id = %s"
-        cursor.execute(update_need_sql, (new_amount_requered, need_fk))
-
         conn.commit()
 
         cursor.close()
@@ -1655,6 +1897,48 @@ async def update_donation(
 
     except Exception as e:
         conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/donationsComplete/{donation_id}")
+async def toggle_donation_complete(donation_id: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Verificar si la donación existe
+        cursor.execute(
+            "SELECT complete FROM donations WHERE donation_id = %s",
+            (donation_id,)
+        )
+        donation = cursor.fetchone()
+
+        if not donation:
+            raise HTTPException(status_code=404, detail="Donación no encontrada.")
+
+        current_complete = donation[0]
+
+        # Alternar el estado de 'complete'
+        new_complete = not current_complete
+
+        # Actualizar el estado en la base de datos
+        cursor.execute(
+            "UPDATE donations SET complete = %s WHERE donation_id = %s",
+            (new_complete, donation_id)
+        )
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "message": "Estado de 'complete' actualizado exitosamente.",
+            "donation_id": donation_id,
+            "new_complete": new_complete
+        }
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/donations/{donation_id}")
@@ -1692,3 +1976,724 @@ async def delete_donation(donation_id: str):
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/donationsRan/ranking")
+async def get_donation_ranking():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        ranking_sql = """
+        SELECT 
+            d.user_id AS donor_id,
+            COALESCE(COUNT(don.donation_id), 0) AS total_donations,
+            d.images AS donor_image,
+            d.user_name AS donor_name,
+            d.is_sponsor  
+        FROM 
+            donors d
+        LEFT JOIN 
+            donations don ON d.user_id = don.donor_id
+            AND don.complete = TRUE
+        GROUP BY 
+            d.user_id, d.is_sponsor, d.images, d.user_name
+        """
+        cursor.execute(ranking_sql)
+        ranking = cursor.fetchall()
+
+        if not ranking:
+            raise HTTPException(status_code=404, detail="No se encontraron donantes.")
+
+        result = []
+        for row in ranking:
+            donor_id, total_donations, donor_image, donor_name, is_sponsor = row
+            if is_sponsor:
+                total_donations += 10
+            result.append({
+                "donor_id": donor_id,
+                "total_donations": total_donations,
+                "donor_image": donor_image,
+                "donor_name": donor_name
+            })
+
+        result = sorted(result, key=lambda x: x['total_donations'], reverse=True)
+
+        top_donor_info = result[0] if result else None
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "ranking": result,
+            "top_donor": top_donor_info
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.get("/centers/comunityNeeds/{need_type}/{urgency}", response_model=dict)  # Con filtros (CUANDO SE INSTANCIE, ESTOS METODOS NECESITAN NUEVA UPDATE)
+@app.get("/centers/comunityNeeds", response_model=dict)  # Sin filtros
+async def get_comunity_centers_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        # Validar que el need_type sea válido si está presente
+        valid_need_types = {"money", "food", "clothes"}
+        if need_type and need_type not in valid_need_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El tipo de necesidad '{need_type}' no es válido. Use uno de: {', '.join(valid_need_types)}"
+            )
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Construir la consulta base
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'comunity_center'
+            AND n.amount_requered > 0
+        """
+        
+        # Agregar filtros dinámicos
+        filters = []
+        params = []
+        
+        if need_type:
+            filters.append("n.need_type = %s")
+            params.append(need_type)
+        
+        if urgency is not None:  # Urgencia explícita (True/False)
+            filters.append("n.urgency = %s")
+            params.append(urgency)
+        
+        # Combinar filtros en la consulta si existen
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        # Ejecutar la consulta
+        cursor.execute(base_query, tuple(params))
+        centers = cursor.fetchall()
+
+        # Validar resultados
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron centros comunitarios con los filtros especificados."
+            )
+
+        # Construir la respuesta
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        # Cerrar la conexión
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener los centros comunitarios con necesidades: {str(e)}"
+        )
+
+
+
+@app.get("/centers/bankNeeds/{need_type}/{urgency}", response_model=dict)  # Food_bank con filtro opcional
+@app.get("/centers/bankNeeds", response_model=dict)  # Food_bank sin filtro
+async def get_food_bank_centers_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'food_bank'
+            AND n.amount_requered > 0
+        """
+        
+        filters = []
+        if need_type:
+            filters.append("n.need_type = %s")
+        if urgency is not None:
+            filters.append("n.urgency = %s")
+        
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        params = tuple(param for param in [need_type, urgency] if param is not None)
+        cursor.execute(base_query, params)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron bancos de alimentos con los filtros especificados."
+            )
+
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener los bancos de alimentos con necesidades: {str(e)}"
+        )
+
+
+@app.get("/centers/sheltersNeeds/{need_type}/{urgency}", response_model=dict)  # Childrens_shelters con filtro opcional
+@app.get("/centers/sheltersNeeds", response_model=dict)  # Childrens_shelters sin filtro
+async def get_shelters_with_needs(
+    need_type: str | None = None, 
+    urgency: bool | None = None
+):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        base_query = """
+            SELECT 
+                c.user_name AS center_name,
+                c.addres AS address,
+                CONCAT('http://127.0.0.1:8000', c.images) AS image,
+                n.need_type AS need_type,
+                n.amount_requered AS amount_requered,
+                n.urgency AS urgency
+            FROM center c
+            JOIN needss n ON c.user_id = n.center_fk
+            WHERE c.type_center = 'childrens_shelters'
+            AND n.amount_requered > 0
+        """
+        
+        filters = []
+        if need_type:
+            filters.append("n.need_type = %s")
+        if urgency is not None:
+            filters.append("n.urgency = %s")
+        
+        if filters:
+            base_query += " AND " + " AND ".join(filters)
+        
+        params = tuple(param for param in [need_type, urgency] if param is not None)
+        cursor.execute(base_query, params)
+        centers = cursor.fetchall()
+
+        if not centers:
+            raise HTTPException(
+                status_code=404, 
+                detail="No se encontraron casas hogares con los filtros especificados."
+            )
+
+        centers_data = [
+            {
+                "center_name": center[0],
+                "address": center[1],
+                "image": center[2],
+                "need_type": center[3],
+                "amount_required": center[4],
+                "urgency": center[5],
+            }
+            for center in centers
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"centers": centers_data}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener las casas hogares con necesidades: {str(e)}"
+        )
+
+@app.get("/users/sponsors")  # Traer todos los patrocinadores
+async def get_all_sponsors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+            WHERE is_sponsor = TRUE
+        """)
+        sponsors = cursor.fetchall()
+
+        if not sponsors:
+            raise HTTPException(status_code=404, detail="No se encontraron patrocinadores.")
+
+        sponsors_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in sponsors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"sponsors": sponsors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/users/sponsors3")  # Traer los tres primeros patrocinadores
+async def get_top_three_sponsors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, user_name, email, is_verified, is_admin, is_sponsor, images
+            FROM users
+            WHERE is_sponsor = TRUE
+            ORDER BY user_id ASC
+            LIMIT 3
+        """)
+        top_sponsors = cursor.fetchall()
+
+        if not top_sponsors:
+            raise HTTPException(status_code=404, detail="No se encontraron patrocinadores.")
+
+        top_sponsors_data = [
+            {
+                "user_id": user[0],
+                "user_name": user[1],
+                "email": user[2],
+                "is_verified": user[3],
+                "is_admin": user[4],
+                "is_sponsor": user[5],
+                "images": user[6],
+            }
+            for user in top_sponsors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"top_sponsors": top_sponsors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/ConvertSponsor/{email}")#Convertir o quitar en sponsor a alguien (todo tipo de usuarios)
+async def toggle_sponsor_status(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Obtener el estado actual del donante
+        cursor.execute("SELECT is_sponsor FROM donors WHERE email = %s", (email,))
+        donor = cursor.fetchone()
+        if not donor:
+            raise HTTPException(status_code=404, detail="Donante no encontrado.")
+        
+        # Alternar el valor de is_sponsor
+        new_status = not donor['is_sponsor']
+        
+        # Actualizar el valor en la base de datos
+        cursor.execute(
+            "UPDATE donors SET is_sponsor = %s WHERE email = %s",
+            (new_status, email)
+        )
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+        
+        return {
+            "message": "Estado de patrocinador actualizado exitosamente.",
+            "email": email,
+            "is_sponsor": new_status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/deleteCenter/{email}")#Eliminar usuarios tipo centros, (se conservan las donaciones indicando como null al borrar sus datos de amount)
+async def delete_center(email: str):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT user_id FROM users WHERE email = %s", (email,))
+        user = cursor.fetchone()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado.")
+        
+        cursor.execute("SELECT need_id FROM needss WHERE center_fk = %s", (user['user_id'],))
+        needs = cursor.fetchall()
+
+        if needs:
+            for need in needs:
+                cursor.execute("UPDATE amount SET needs_fk = NULL WHERE needs_fk = %s", (need['need_id'],))
+
+        cursor.execute("DELETE FROM needss WHERE center_fk = %s", (user['user_id'],))
+
+        cursor.execute("DELETE FROM users WHERE email = %s", (email,))
+        conn.commit()
+
+        cursor.close()
+        conn.close()
+        
+        return {"message": "Centro y sus necesidades eliminados exitosamente, donaciones conservadas."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# le añadí esto para poder separar a los usuarios donantes de los centros 
+@app.get("/donors")  # Obtener todos los donantes
+async def get_all_donors():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT user_id, user_name, last_name, email, phone_numer, is_verified, is_admin, is_sponsor, images
+            FROM donors
+        """)
+        donors = cursor.fetchall()
+
+        if not donors:
+            raise HTTPException(status_code=404, detail="No hay donantes registrados.")
+
+        donors_data = [
+            {
+                "user_id": donor[0],
+                "user_name": donor[1],
+                "last_name": donor[2],
+                "email": donor[3],
+                "phone_numer": donor[4], # le cambie el nombre pq en la tabla de la bd estaba escrito así
+                "is_verified": donor[5],
+                "is_admin": donor[6],
+                "is_sponsor": donor[7],
+                "images": donor[8],
+            }
+            for donor in donors
+        ]
+
+        cursor.close()
+        conn.close()
+        return {"donors": donors_data}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+#crud news (in mongodb)
+@app.post("/news", dependencies=[Depends(validate_center_token)])
+async def create_news(
+    title: str = Form(...),
+    content: str = Form(...),
+    status: Literal["urgent", "priority", "events", "common"] = Form(...),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)  # Obtén los datos del usuario autenticado
+):
+    try:
+        # Subir la imagen si se proporciona
+        image_url = None
+        if image:
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_url = f"/uploaded_images/{image.filename}"
+
+        # Crear el documento de la noticia
+        news_data = {
+            "title": title,
+            "content": content,
+            "public_date": datetime.utcnow(),
+            "image": image_url,
+            "status": status,
+            "author": current_user["sub"],  # Email del autor desde el token
+        }
+
+        # Insertar en MongoDB
+        result = news_collection.insert_one(news_data)
+        return {"message": "News created successfully", "news_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def update_news(
+    news_id: str,
+    new_title: Optional[str] = Form(None),
+    content: Optional[str] = Form(None),
+    status: Optional[Literal["urgent", "priority", "events"]] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    current_user: dict = Depends(validate_center_token)
+):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para actualizar esta noticia")
+
+        # Actualizar los campos proporcionados
+        update_data = {}
+        if new_title:
+            update_data["title"] = new_title
+        if content:
+            update_data["content"] = content
+        if status:
+            update_data["status"] = status
+        if image:
+            # Subir la nueva imagen
+            image_path = UPLOAD_DIR / image.filename
+            with image_path.open("wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            update_data["image"] = f"/uploaded_images/{image.filename}"
+
+        # Actualizar en MongoDB
+        result = news_collection.update_one({"_id": ObjectId(news_id)}, {"$set": update_data})
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/news/{news_id}", dependencies=[Depends(validate_center_token)])
+async def delete_news(news_id: str, current_user: dict = Depends(validate_center_token)):
+    try:
+        # Verificar que la noticia existe y pertenece al usuario
+        news = news_collection.find_one({"_id": ObjectId(news_id), "author": current_user["sub"]})
+        if not news:
+            raise HTTPException(status_code=403, detail="No tienes permiso para eliminar esta noticia")
+
+        # Eliminar la noticia
+        result = news_collection.delete_one({"_id": ObjectId(news_id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="News not found")
+
+        return {"message": "News deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/news/special", dependencies=[Depends(validate_center_token)])#crear las noticias especiales
+async def create_special_news(
+    title: str = Form(...),
+    image: UploadFile = File(...),
+    current_user: dict = Depends(validate_center_token)  # Obtener los datos del usuario autenticado
+):
+    try:
+        # Verificar y subir la imagen
+        if not image:
+            raise HTTPException(status_code=400, detail="An image is required")
+        
+        image_path = UPLOAD_DIR / image.filename
+        with image_path.open("wb") as buffer:
+            shutil.copyfileobj(image.file, buffer)
+        image_url = f"/uploaded_images/{image.filename}"
+
+        news_data = {
+            "title": title,
+            "public_date": datetime.utcnow(),
+            "image": image_url,
+            "status": "event",  
+            "author": current_user["sub"],  # Email del autor desde el token
+        }
+
+        # Insertar en MongoDB
+        result = news_collection.insert_one(news_data)
+        return {"message": "Simple news created successfully", "news_id": str(result.inserted_id)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/special")#traer las noticias que apareceran arriba (solo imagenes y su estatus varia)
+async def get_event_news(
+    page: int = Query(1, ge=1), 
+    page_size: int = Query(10, ge=1, le=100)
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Filtrar noticias con status "event" y obtener resultados paginados
+        events = list(
+            news_collection.find({"status": "event"})
+            .skip(skip)
+            .limit(limit)
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for event in events:
+            event["_id"] = str(event["_id"])
+
+        # Contar el total de documentos con status "event"
+        total_events = news_collection.count_documents({"status": "event"})
+
+        return {
+            "message": "Event news retrieved successfully",
+            "total": total_events,
+            "page": page,
+            "page_size": page_size,
+            "data": events,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/secret") #llamar news de donateme (las principales)
+async def get_secret_news(
+    page: int = Query(1, ge=1), 
+    page_size: int = Query(10, ge=1, le=100)
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Filtrar noticias con status "event" y obtener resultados paginados
+        events = list(
+            news_collection.find({"status": "admin"})
+            .skip(skip)
+            .limit(limit)
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for event in events:
+            event["_id"] = str(event["_id"])
+
+        # Contar el total de documentos con status "event"
+        total_events = news_collection.count_documents({"status": "event"})
+
+        return {
+            "message": "Event news retrieved successfully",
+            "data": events,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news")
+async def get_all_news(
+    center_email: str = None,  # Parámetro opcional para filtrar por correo del centro
+    page: int = Query(1, ge=1),  # Página por defecto 1, y mayor o igual a 1
+    page_size: int = Query(10, ge=1, le=100)  # Tamaño de página por defecto 10, entre 1 y 100
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Crear el filtro para las noticias por autor (correo del centro)
+        filter = {}
+        if center_email:
+            filter["author"] = center_email  # Asumimos que 'author' es el campo que guarda el correo del centro
+
+        # Obtener las noticias con paginación y filtro por autor (correo del centro)
+        news = list(
+            news_collection.find(filter)  # Filtra por correo del centro
+            .skip(skip)  # Descartar los documentos anteriores a la página actual
+            .limit(limit)  # Limitar los resultados al tamaño de la página
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for news_item in news:
+            news_item["_id"] = str(news_item["_id"])
+
+        # Contar el total de documentos en la colección filtrados
+        total_news = news_collection.count_documents(filter)  # Total de noticias filtradas por correo del centro
+
+        # Preparar la respuesta
+        return {
+            "message": "News retrieved successfully",
+            "total": total_news,
+            "page": page,
+            "page_size": page_size,
+            "data": news,  # Los datos de las noticias
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/news/with_content")
+async def get_news_with_content(
+    center_email: str = None,  
+    page: int = Query(1, ge=1),  
+    page_size: int = Query(10, ge=1, le=100)  # Tamaño de página por defecto 10, entre 1 y 100
+):
+    try:
+        # Calcular los límites para la paginación
+        skip = (page - 1) * page_size
+        limit = page_size
+
+        # Crear el filtro para las noticias por autor (correo del centro) y que tengan contenido
+        filter = {"content": {"$exists": True, "$ne": ""}}
+        if center_email:
+            filter["author"] = center_email  # Asumimos que 'author' es el campo que guarda el correo del centro
+
+        # Obtener las noticias con paginación, filtro por autor (correo del centro) y contenido no vacío
+        news = list(
+            news_collection.find(filter)  # Filtra por correo del centro y contenido no vacío
+            .skip(skip)  # Descartar los documentos anteriores a la página actual
+            .limit(limit)  # Limitar los resultados al tamaño de la página
+            .sort("public_date", -1)  # Ordenar por fecha de publicación descendente
+        )
+
+        # Convertir ObjectId a string para el cliente
+        for news_item in news:
+            news_item["_id"] = str(news_item["_id"])
+
+        # Contar el total de documentos en la colección filtrados
+        total_news = news_collection.count_documents(filter)  # Total de noticias filtradas por correo del centro y contenido no vacío
+
+        # Preparar la respuesta
+        return {
+            "message": "News with content retrieved successfully",
+            "total": total_news,
+            "page": page,
+            "page_size": page_size,
+            "data": news,  # Los datos de las noticias
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
