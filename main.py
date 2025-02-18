@@ -99,6 +99,17 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+
+class News(BaseModel):
+    id: Optional[str] = Field(alias="_id")  # El _id de MongoDB
+    title: str
+    content: str
+    public_date: datetime = Field(default_factory=datetime.utcnow)
+    image: Optional[str] = None
+    status: Literal["urgent", "priority", "events"]
+    author: str  # ID del autor (puede ser el ID del usuario "center")
+
+
 def get_db_connection():
     return psycopg2.connect(
         host=os.getenv('DB_HOST'),
@@ -115,9 +126,6 @@ class News(BaseModel):
     image: Optional[str] = None
     status: Literal["urgent", "priority", "events"]
     author: str  # ID del autor (puede ser el ID del usuario "center")
-
-
-
     
 def get_mongo_client():#Conectar con mongo(mongodbAtlas)
     mongo_uri = os.getenv("MONGO_URI")
@@ -1635,7 +1643,6 @@ async def get_needs_by_name_and_type(user_name: str, type_need: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 #Crud del diavlo
 
 @app.post("/registerDonation/{donor_fk}/{need_fk}")
@@ -1813,7 +1820,6 @@ async def get_donations_by_donor(donor_id: str):
             for donation in donations
         ]
 
-        # Cerrar cursor y conexión
         cursor.close()
         conn.close()
 
@@ -1825,6 +1831,7 @@ async def get_donations_by_donor(donor_id: str):
 @app.put("/donations/{donation_id}")
 async def update_donation(
     donation_id: str,
+
     new_amount: Optional[int] = Form(None),  # Hacemos que el nuevo monto sea opcional
     comentary: Optional[str] = Form(None),  # Comentario es opcional
     image: Optional[UploadFile] = File(None)  # Imagen es opcional
@@ -1874,7 +1881,6 @@ async def update_donation(
                 shutil.copyfileobj(image.file, buffer)
             new_image_url = f"/uploaded_images/{image.filename}"
 
-        # Si se proporciona un nuevo comentario, lo actualizamos
         update_donation_sql = """
             UPDATE donations 
             SET comentary = COALESCE(%s, comentary), image = %s
