@@ -2651,8 +2651,8 @@ async def get_all_news(
 
 @app.get("/news/with_content")
 async def get_news_with_content(
-    center_email: str = None,  # Parámetro opcional para filtrar por correo del centro
-    page: int = Query(1, ge=1),  # Página por defecto 1, y mayor o igual a 1
+    center_email: str = None,  
+    page: int = Query(1, ge=1),  
     page_size: int = Query(10, ge=1, le=100)  # Tamaño de página por defecto 10, entre 1 y 100
 ):
     try:
